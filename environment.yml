@@ -1,0 +1,12 @@
+name: tsa
+channels:
+  - default
+dependencies:
+  - python=3.11
+  - statsmodels
+  - pandas
+  - numpy
+  - dask
+  - ipykernel
+  - matplotlib
+  - pip
