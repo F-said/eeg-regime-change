@@ -5,7 +5,7 @@ from scipy.stats import norm
 
 from dask import delayed, compute
 
-MAX_LAGS = 128*(1)
+MAX_LAGS = 128*(2)
 
 
 class ARPWarm:
@@ -16,7 +16,7 @@ class ARPWarm:
     def __init__(self, data, n0, M, k, s=128, verbose=True):
         """
         Args:
-            data    : ndarray of 12-channel eeg data
+            data    : dict of 12-channel ndarray
             n0      : 1s window-length during warmup
             M       : tolerated seconds of error/forecast window
             k       : halts when k channels are rejected
@@ -35,25 +35,26 @@ class ARPWarm:
         self.forecast_window = M
         self.forecasts = {}
         self.trained = False
+        self.T = self.n0 * self.sample_rate
 
-    def __warmup_chann(self, ch_data):
+    def __warmup_chann(self, name, data):
         """Warmup individual channel
 
         Args:
-            ch_data :
+            name    : name of channel
+            data    : ndarray of channel data
         """
-        chan_name = ch_data.name
         if self.verbose:
-            print(f"Creating AR(p) for {chan_name}. Determining best order")
+            print(f"Creating AR(p) for {name}. Determining best order")
 
         # select best order via AIC
-        mod = ar_select_order(ch_data, maxlag=MAX_LAGS, ic='aic')
+        mod = ar_select_order(data, maxlag=MAX_LAGS, ic='aic')
 
         if self.verbose:
             print(f"Order AR({mod.ar_lags[-1]})")
 
         # create AR(p) model using selected order
-        model = AutoReg(ch_data, lags=mod.ar_lags)
+        model = AutoReg(data, lags=mod.ar_lags)
         res = model.fit()
 
         if self.verbose:
@@ -64,7 +65,20 @@ class ARPWarm:
         if self.verbose:
             print(f"Innovations generated\nMean:{mu}\nStd-dev:{sig}\n")
 
-        return chan_name, res, mu, sig
+        return name, res, mu, sig
+
+    def __process_chunk(self, chunk):
+        tasks = [delayed(self.__warmup_chann)(ch, self.data[ch][:self.T]) for ch in chunk]
+        results = compute(*tasks)
+
+        return results
+
+    def __process_results(self, result):
+        for ch, res, mu, sig in result:
+            self.arp_channels[ch] = res
+            self.dist_channels[ch] = (mu, sig)
+            # make initial forecast to save time
+            self.forecasts[ch] = res.forecast(self.forecast_window * self.sample_rate)
 
     def warmup(self):
         """Step 1 of CPD baseline algorithm
@@ -75,20 +89,28 @@ class ARPWarm:
             dist_channels
             arp_channels
         """
-        # extract sample of data
+        # TODO: a lot of repeating and perhaps improper usage, refactor
+        # calc sample of data
         T = self.n0 * self.sample_rate
-        sample_data = self.data.iloc[:T]
 
-        chans = sample_data.columns
+        # get all channel names
+        ch_names = list(self.data.keys())
+        # split into 4 partitions for processing
+        chan1 = ch_names[:3]
+        chan2 = ch_names[3:6]
+        chan3 = ch_names[6:9]
+        chan4 = ch_names[9:]
 
-        # find best lag "p" and fit AR(p) on each channel
-        tasks = [delayed(self.__warmup_chann)(sample_data[ch]).values for ch in chans]
-        results = compute(*tasks)
+        # find best lag "p" and fit AR(p) on each channel (in parallel chunks)
+        results1 = self.__process_chunk(chan1)
+        results2 = self.__process_chunk(chan2)
+        results3 = self.__process_chunk(chan3)
+        results4 = self.__process_chunk(chan4)
 
         # assign results to respective channel
-        for ch, res, mu, sig in results:
-            self.arp_channels[ch] = res
-            self.dist_channels[ch] = (mu, sig)
-            # make initial forecast to save time
-            self.forecasts[ch] = res.forecast(self.forecast_window * self.sample_rate)
+        self.__process_results(results1)
+        self.__process_results(results2)
+        self.__process_results(results3)
+        self.__process_results(results4)
+
         self.trained = True

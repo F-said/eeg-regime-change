@@ -8,5 +8,6 @@ dependencies:
   - numpy
   - dask
   - ipykernel
+  - joblib
   - matplotlib
   - pip

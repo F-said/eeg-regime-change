@@ -1,6 +1,5 @@
 import numpy as np
 
-MAX_LAGS = 128*(1/2)
 SIGMA = 5
 
 
@@ -13,7 +12,7 @@ class Online:
         """
         Args:
             trained_model   : object containing warmed models
-            verbose : option to print
+            verbose         : option to print
         """
         self.trained_model = self.make_model(trained_model)
         self.verbose = verbose
