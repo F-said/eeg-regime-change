@@ -5,34 +5,32 @@ from scipy.stats import norm
 
 from dask import delayed, compute
 
-MAX_LAGS = 128*(2)
-
+MAX_LAGS = 128*3
+LOOKAHEAD = 10
 
 class ARPWarm:
     """
     Seperate logic to warmup benchmark
     """
 
-    def __init__(self, data, n0, M, k, s=128, verbose=True):
+    def __init__(self, data, n0, M, s=128, verbose=True):
         """
         Args:
             data    : dict of 12-channel ndarray
             n0      : 1s window-length during warmup
             M       : tolerated seconds of error/forecast window
-            k       : halts when k channels are rejected
             s       : sampling rate of eeg (Hz)
             verbose : option to print
         """
         self.data = data
         self.n0 = n0
         self.M = M
-        self.k = k
         self.sample_rate = s
         self.verbose = verbose
 
         self.dist_channels = {}
         self.arp_channels = {}
-        self.forecast_window = M
+        self.forecast_window = M * LOOKAHEAD
         self.forecasts = {}
         self.trained = False
         self.T = self.n0 * self.sample_rate
@@ -44,26 +42,22 @@ class ARPWarm:
             name    : name of channel
             data    : ndarray of channel data
         """
-        if self.verbose:
-            print(f"Creating AR(p) for {name}. Determining best order")
-
-        # select best order via AIC
         mod = ar_select_order(data, maxlag=MAX_LAGS, ic='aic')
 
         if self.verbose:
-            print(f"Order AR({mod.ar_lags[-1]})")
+            print(f"{name}: order AR({mod.ar_lags[-1]})")
 
         # create AR(p) model using selected order
         model = AutoReg(data, lags=mod.ar_lags)
         res = model.fit()
 
         if self.verbose:
-            print(f"Fitting complete\nAIC:{res.aic}\nLog-Likelihood:{res.llf}")
+            print(f"{name}: fitting complete\nAIC:{res.aic}\nLog-Likelihood:{res.llf}")
 
         # get gaussian mean/std of innovations
         mu, sig = norm.fit(res.resid)
         if self.verbose:
-            print(f"Innovations generated\nMean:{mu}\nStd-dev:{sig}\n")
+            print(f"{name}: innovations generated\nMean:{mu}\nStd-dev:{sig}\n")
 
         return name, res, mu, sig
 
