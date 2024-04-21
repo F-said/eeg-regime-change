@@ -1,4 +1,5 @@
 import numpy as np
+from CPD.benchwarm import LOOKAHEAD
 
 SIGMA = 5
 
@@ -8,19 +9,21 @@ class Online:
     Benchmark change-point-detection algorithm
     """
 
-    def __init__(self, trained_model, k, verbose=True):
+    def __init__(self, trained_model, k, M, verbose=True):
         """
         Args:
             trained_model   : object containing warmed models
             k               : halts when k channels are rejected
+            M               : tolerated seconds of error/forecast window
             verbose         : option to print
         """
         self.trained_model = self.make_model(trained_model)
         self.verbose = verbose
+        self.M = M
         self.k = k
 
         self.forecasts = self.trained_model.forecasts
-        self.forecast_window = self.trained_model.forecast_window
+        self.forecast_window = LOOKAHEAD
 
     def make_model(self, trained_model):
         if trained_model is None:
@@ -31,11 +34,13 @@ class Online:
         return trained_model
 
     def __update_forecasts(self):
+        # extract model parameters
         model = self.trained_model
         sample_rate = model.sample_rate
         arp_channels = model.arp_channels
         ch_names = list(model.data.keys())
 
+        # extend forecasts
         self.forecast_window += self.forecast_window
         for ch in ch_names:
             inc = arp_channels[ch].forecast(self.forecast_window * sample_rate)
@@ -48,7 +53,7 @@ class Online:
         Returns:
             innovations : prediction error on next window
         """
-        # extract all model parameters
+        # extract model parameters
         model = self.trained_model
         sample_rate = model.sample_rate
         n0 = model.n0
@@ -57,16 +62,18 @@ class Online:
         # calculate next window of data (+1 second)
         window = step * sample_rate
         # exit if beyond samples
-        if window > data[ch].shape[0]:
+        if window >= data[ch].shape[0]:
+            print("Past!")
             return None
 
-        # predict data in next sample rate window using AR(p) results
+        # check if forecasts should be extended
         next_forecast = (step - n0) + 1
         # check if we need to make more forecasts
         if next_forecast > self.forecast_window:
             # update forecasts across channels
             self.__update_forecasts()
 
+        # select window of predictions
         pred = self.forecasts[ch]
         stop = next_forecast * sample_rate
         start = stop - sample_rate
@@ -92,9 +99,10 @@ class Online:
         # begin looping immediatley after warm-up step
         step = n0
 
-        # track halted channels
+        # track halted channels (and when they've halted)
         halted = []
         active = list(data.keys())
+        halted_times = {}
 
         # track reject count
         rejected = {}
@@ -104,6 +112,7 @@ class Online:
         # run channels synchronously
         next_innov = 0
 
+        # kepep running until we run out of data
         while next_innov is not None:
             # update active list
             active = list(set(active) - set(halted))
@@ -114,14 +123,14 @@ class Online:
                 if len(halted) >= self.k:
                     if self.verbose:
                         print(f"{self.k} channels halted. Halting detection.")
-                    return step * sample_rate
+                    return halted_times
 
                 next_innov = self.__predict(ch, step)
                 if next_innov is None:
                     if self.verbose:
                         print(f"No more data! Stopped at step {step}")
                         step = 0
-                    return step * sample_rate
+                    return halted_times
 
                 # calc 5-sig
                 mu, sig = dist_channels[ch]
@@ -138,21 +147,21 @@ class Online:
                         if self.verbose:
                             print(f"{ch} detected change point! Halting.")
                         halted.append(ch)
+                        halted_times[ch] = step * sample_rate
                 else:
                     # otherwise reset rejection count
-                    rejected[ch] = 0
-                    if self.verbose:
-                        print(f"{ch} reset rejection count {rejected[ch]}")
+                    if self.verbose and rejected[ch] > 0:
+                        print(f"{ch} resetting rejection")
+                        rejected[ch] = 0
             step += 1
 
         # return last-recorded halt-point
-        return step * sample_rate
+        return halted_times
 
     def __decide(self, count):
         """Step 4 of CPD baseline algorithm
         """
-        M = self.trained_model.M
-        return count > M
+        return count > self.M
 
     def run(self):
         """Run online CPD algo
@@ -162,8 +171,8 @@ class Online:
         """
         sample = self.__detect()
 
-        # TODO: pickle all objects after running
-        return sample
+        # TODO: pickle objects after running
+        return sample, self.forecasts
 
     def find_params(self, iter=50):
         """Find best hyperparameters via random grid-search.
@@ -179,7 +188,7 @@ class Online:
         Returns:
             None
         """
-        # TODO: how can this be tuned???
+        # TODO: tune by using results of offline algo
         n0 = []
 
 

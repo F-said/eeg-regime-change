@@ -5,32 +5,31 @@ from scipy.stats import norm
 
 from dask import delayed, compute
 
-MAX_LAGS = 128*3
-LOOKAHEAD = 10
+MAX_LAGS = 128*4
+LOOKAHEAD = 128*5
+
 
 class ARPWarm:
     """
     Seperate logic to warmup benchmark
     """
 
-    def __init__(self, data, n0, M, s=128, verbose=True):
+    def __init__(self, data, n0, chunks=4, s=128, verbose=True):
         """
         Args:
             data    : dict of 12-channel ndarray
             n0      : 1s window-length during warmup
-            M       : tolerated seconds of error/forecast window
             s       : sampling rate of eeg (Hz)
             verbose : option to print
         """
         self.data = data
         self.n0 = n0
-        self.M = M
+        self.chunks = chunks
         self.sample_rate = s
         self.verbose = verbose
 
         self.dist_channels = {}
         self.arp_channels = {}
-        self.forecast_window = M * LOOKAHEAD
         self.forecasts = {}
         self.trained = False
         self.T = self.n0 * self.sample_rate
@@ -72,7 +71,7 @@ class ARPWarm:
             self.arp_channels[ch] = res
             self.dist_channels[ch] = (mu, sig)
             # make initial forecast to save time
-            self.forecasts[ch] = res.forecast(self.forecast_window * self.sample_rate)
+            self.forecasts[ch] = res.forecast(LOOKAHEAD * self.sample_rate)
 
     def warmup(self):
         """Step 1 of CPD baseline algorithm
@@ -84,27 +83,23 @@ class ARPWarm:
             arp_channels
         """
         # TODO: a lot of repeating and perhaps improper usage, refactor
-        # calc sample of data
-        T = self.n0 * self.sample_rate
 
         # get all channel names
         ch_names = list(self.data.keys())
-        # split into 4 partitions for processing
-        chan1 = ch_names[:3]
-        chan2 = ch_names[3:6]
-        chan3 = ch_names[6:9]
-        chan4 = ch_names[9:]
+        size = len(ch_names)//self.chunks
 
-        # find best lag "p" and fit AR(p) on each channel (in parallel chunks)
-        results1 = self.__process_chunk(chan1)
-        results2 = self.__process_chunk(chan2)
-        results3 = self.__process_chunk(chan3)
-        results4 = self.__process_chunk(chan4)
+        inc = 1
+        start_chunk = 0
+        end_chunk = size * inc
 
-        # assign results to respective channel
-        self.__process_results(results1)
-        self.__process_results(results2)
-        self.__process_results(results3)
-        self.__process_results(results4)
+        # process data in "chunks" chunk size
+        while end_chunk <= len(ch_names):
+            chunk_n = ch_names[start_chunk:end_chunk]
+            results_n = self.__process_chunk(chunk_n)
+            self.__process_results(results_n)
+
+            start_chunk = end_chunk
+            inc += 1
+            end_chunk = size * inc
 
         self.trained = True

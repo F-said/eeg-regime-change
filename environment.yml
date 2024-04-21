@@ -10,4 +10,6 @@ dependencies:
   - ipykernel
   - joblib
   - matplotlib
+  - scikit-learn
+  - hmmlearn
   - pip
