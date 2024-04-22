@@ -3,32 +3,191 @@ import numpy
 import numpy as np
 from statsmodels.tsa.ar_model import AutoReg
 
+from sdt.changepoint import BayesOnline
+from scipy.signal import butter, filtfilt
+
+
 class Online:
-    """Bayesian w/innovation
+    """1/3 of "Time-Series Anomaly Detection Service at Microsoft"
+    https://arxiv.org/pdf/1906.03821.pdf
 
-    Would it be possible to make a change-point
-    detection algorithm with NO change-point, and
-    rather "train as you go", with some metric for
-    outlier detection.
+    Calculates the spectral residual on a window of "warmup data"
+    which is the log spectrum subtracted by the averaged log spectrum.
+    This "compressed representation of the sequence while the innovation
+    part of the original sequence becomes more significant."
 
-    Well, PCA would definitley help, although it
-    would also assume some time for "training"
-    but maybe it could be minimal
+    R(f) = (hq(f) * log(A(f))) - log(A(f))
+    A(f) = Amplitude of window of DFT
+    P(f) = Phase of window of DFT
 
-    The problem with PCA is the fact that it needs
-    the entire df to figure 
+    This spectral residual is then transformed back into the spatial
+    domain via inverse DFT, which is called the saliency map.
 
-    Power Spectral Analysis of PCA components
-    Needed: Live PCA (X)
-    Needed: Live wavelet transform
+    S(x) = abs(invfft(e^(R(f) + iP(f))))
 
-    1) Check if wavelet transform of PCA is similair to original
-    2) Find iterative PCA algo
-    3) Find wavelet transform algo
-    4) Find good way to combine the two without being too slow
-    5) Run & get results
+    Next, the Microsoft people apply a CNN to detect anomolies,
+    however, I will instead apply the Bayesian online predictor from
+    "Bayesian Online Changepoint detection": https://arxiv.org/pdf/0710.3742.pdf
+    on this transformed data.
+
+    For every additional window of data, we apply the saliency map transformation
+    & then use the online bayesian change-point detection to check if a regime
+    change occured
+    TODO: make Online a template class
     """
-    ...
+
+    def __init__(self, trained_model, k, prob=0.80, verbose=True):
+        """
+        Args:
+            trained_model   : object containing warmed models
+            k               : halts when k channels are rejected
+            prob            : tolerated probability
+            verbose         : option to print
+        """
+        self.trained_model = self.make_model(trained_model)
+        self.verbose = verbose
+        self.prob = prob
+        self.k = k
+
+        self.bayesian_cpd = self.trained_model.bayesian_cpd
+        self.sample_rate = self.trained_model.sample_rate
+        # init high-pass filter
+        self.b, self.a = butter(
+            N=2, Wn=1/(0.5*self.sample_rate),
+            btype='high',
+            analog=False
+        )
+
+    def make_model(self, trained_model):
+        if trained_model is None:
+            print("No trained model! Please warmup before running.")
+        if not trained_model.trained:
+            print("Model not trained! Training now.")
+            trained_model.warmup()
+        return trained_model
+
+    def __saliency(self, ch, step):
+        """Calculate saliency map in next window of size s
+        for channel
+
+        Returns:
+            innovations : prediction error on next window
+        """
+        # extract model parameters
+        model = self.trained_model
+        data = model.data
+
+        # calculate next window of data (+1 second)
+        window = step * self.sample_rate
+        # exit if beyond samples
+        if window >= data[ch].shape[0]:
+            print("Past!")
+            return None
+        window_data = data[ch][window:window + self.sample_rate]
+
+        # calc saliency
+        # compute high-pass filter
+        filt_data = filtfilt(self.b, self.a, window_data)
+
+        # compute FFT for channel
+        magnitudes = np.fft.rfft(filt_data)
+
+        # calculate spectral residual
+        amplitudes = abs(magnitudes)
+        phase = np.angle(magnitudes)
+
+        lf = np.log(amplitudes)
+
+        length = len(lf)
+        val = (1 / length ** 2)
+        q_matrix = np.full((length, length), val)
+        alf = np.dot(q_matrix, lf.T)
+
+        rf = lf - alf
+
+        # calculate saliency map
+        saliency = abs(np.fft.ifft(np.exp(rf + phase * 1j)))
+
+        return saliency
+
+    def __detect(self):
+        """Check if next saliency map
+        is detected as a change-point via bcpd
+        """
+        # extract all model parameters
+        model = self.trained_model
+        n0 = model.n0
+        data = model.data
+        sample_rate = model.sample_rate
+
+        # begin looping immediatley after warm-up step
+        step = n0
+
+        # track halted channels (and when they've halted)
+        halted = []
+        active = list(data.keys())
+        halted_times = {}
+
+        # run channels synchronously
+        next_innov = 0
+
+        # kepep running until we run out of data
+        while next_innov is not None:
+            # update active list
+            active = list(set(active) - set(halted))
+
+            if self.verbose:
+                print(f"STEP {step}")
+            # break out of loop if all channels inactive
+            if len(active) == 0:
+                break
+
+            # check bayesian prob for each channel
+            for ch in active:
+                if len(halted) >= self.k:
+                    if self.verbose:
+                        print(f"{self.k} channels halted. Halting detection.")
+                    return halted_times
+
+                next_map = self.__saliency(ch, step)
+                if next_map is None:
+                    if self.verbose:
+                        print(f"No more data! Stopped at step {step}")
+                        step = 0
+                    return halted_times
+
+                # update bayesian changepoint detector and halt if detected
+                # for next saliency
+                for i in range(0, len(next_map), sample_rate // 4):
+                    try:
+                        self.bayesian_cpd[ch].update(next_map[i])
+                    except:
+                        continue
+
+                    prob = self.bayesian_cpd[ch].get_probabilities(3)
+                    if len(prob) >= 1 and np.any(prob[1:] > self.prob):
+                        if self.verbose:
+                            print(f"{ch} detected change point! Halting.")
+                        halted.append(ch)
+                        halted_times[ch] = step * sample_rate
+                        break
+
+            step += 1
+
+        # return last-recorded halt-point
+        return halted_times
+
+    def run(self):
+        """Run online CPD algo
+
+        Returns:
+            None
+        """
+        sample = self.__detect()
+
+        # TODO: pickle objects after running
+        return sample
+
 
 class AR():
     """

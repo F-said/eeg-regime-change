@@ -1,5 +1,5 @@
 import numpy as np
-from CPD.benchwarm import LOOKAHEAD
+from CPD.warm import LOOKAHEAD
 
 SIGMA = 5
 
