@@ -81,6 +81,9 @@ class Online:
 
         # calculate innovations in this window by comparing actual data
         next_data = data[ch][window:window + sample_rate]
+        if next_data.shape[0] < pred.shape[0]:
+            print("Past!")
+            return None
         innovations = next_data - pred
 
         return innovations
@@ -119,6 +122,10 @@ class Online:
 
             if self.verbose:
                 print(f"STEP {step}")
+            # break out of loop if all channels inactive
+            if len(active) == 0:
+                break
+
             for ch in active:
                 if len(halted) >= self.k:
                     if self.verbose:
