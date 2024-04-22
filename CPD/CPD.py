@@ -46,7 +46,7 @@ class AR():
         n = data.shape[0]
         nans = np.ones(self.p) * np.nan
         data = np.concatenate((nans, data), axis=0)
-        X = np.zeros((n, self.p+1))
+        X = np.ones((n, self.p+1))
         for i in range(self.p):
             X[:, i+1] = data[i: -self.p + i]
         return X
