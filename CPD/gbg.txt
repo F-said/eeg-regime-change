@@ -1,0 +1,125 @@
+
+
+class OfflineGauss:
+
+    """
+    Offline Algorithm for change point detection:
+        - Cost function -> MSE
+        - Internal Model -> Gaussian
+        - Search Algorithm -> Opt
+    Description:
+        This algorithm is essentially a search algorithm. Leveraging
+        dynamic programming to search for which change points result 
+        in the smallest total cost. This approach is specific to the
+        problem of CPD when the number of change points is known.
+
+    Possible Innovations:
+        -Weight loss function by channels
+            Some channels display change points more
+            clearly than others, thus we should make sure the model's
+            cost on this channel/channels is low.
+        -Learnable weights on the channels loss vs hyper parameter.
+    """
+    def __init__(self, k : int):
+        """
+        Solves the CPD problem for K different
+        regimes (K-1) regime changes, 
+        """
+        self.k = k
+
+    def log_liklihood(self, mu, sigma, data):
+        val = 0
+        sigma_inv = np.linalg.pinv(sigma)
+        n = data.shape[0]
+        liklihood = 0
+        mu = mu.reshape(-1)
+        for i in range(data.shape[1]):
+            y = data[:, i]
+            lik =  (-1/2) * ( (y - mu).T @ sigma_inv @ (y-mu) ) 
+            liklihood+=lik
+            
+        return liklihood
+
+    def _fit_model(self, data : np.array):
+        """
+        data: sub_section of the data which we will fit a model
+        to. data is of the form (C, T') where C is the # of channels
+        and T' is the # of timesteps in the data.
+        """
+        mu = data.sum(axis=1, keepdims=True) / data.shape[1]
+        sigma = 1/(data.shape[1] -1) * (data - mu) @ (data-mu).T
+
+        return mu, sigma
+
+
+    def _cost(self, sub_section : np.array):
+        """
+        sub_section: sub_section of the data which we will fit a model
+        to and calculate the cost for. 
+        sub_section is of the form (C, T) where C is the # of channels
+        and T is the # of timesteps.
+        """
+        if sub_section.shape[1] <= 1:
+            return np.inf
+
+        mu, sigma = self._fit_model(sub_section)
+        return - self.log_liklihood(mu, sigma, sub_section)
+
+    def find_change_points(self, data):
+
+        ##Initialize DP array
+        C = np.zeros((self.k, data.shape[1], data.shape[1]))
+        for u in range(data.shape[1]):
+            sys.stdout.write(f"Init %: {round(u/(data.shape[1]) * 100, 5)} \r")
+            for v in range(u+1, data.shape[1]):
+                temp = self._cost(data[:,u:v])
+                C[0,u,v] = temp
+
+        print("Fill")
+        #Fill DP Array
+        for k in range(2, self.k-1):
+            for u in range(data.shape[1]):
+                for v in range(u+k, data.shape[1]):
+                    min_cost = np.inf
+                    min_t = -1
+                    for t in range(u+k-1,v):
+                        cost = c[k-1,u,t] + c[0,t+1,v]
+                        if cost < min_cost:
+                            min_cost = cost
+                            min_t = t
+                    c[k,u,v] = cost
+
+        print("Reconstruct")
+        #Reconstruct Solution
+        L = np.zeros(self.k+1)
+        L[self.k] = data.shape[1]-1
+        k = self.k
+        while k > 1:
+            s = int(L[k])
+            t_star = -1
+            min_cost = np.inf
+            for t in range(k-1, s):
+                cost = C[k-1, 0, t] + C[0, t+1, s]
+                if cost < min_cost:
+                    min_cost = cost
+                    t_star = t
+            L[k-1] = t_star
+            k -= 1
+
+        return L
+
+
+
+
+
+
+            
+
+
+
+
+
+
+            
+
+
