@@ -5,7 +5,7 @@ from scipy.stats import norm
 
 from dask import delayed, compute
 
-MAX_LAGS = 128*4
+MAX_LAGS = 128*1
 LOOKAHEAD = 128*5
 
 
@@ -95,6 +95,7 @@ class ARPWarm:
         # process data in "chunks" chunk size
         while end_chunk <= len(ch_names):
             chunk_n = ch_names[start_chunk:end_chunk]
+            print(chunk_n)
             results_n = self.__process_chunk(chunk_n)
             self.__process_results(results_n)
 
