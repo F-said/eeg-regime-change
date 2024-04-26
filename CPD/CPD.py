@@ -224,6 +224,45 @@ class AR():
             raise Exception ("Did Not Fit Model.")
         X = self._build_lag_matrix(data)
         return X @ self.params
+
+
+class OfflineWrapper:
+    """
+    Predicts on the Channel level rather than for
+    all channels at the same time.
+    """
+    def __init__(self, k, model='AR', p=-1):
+        self.models = []
+        if model == "AR":
+            self.offline = Offline(k, model="AR", p=p)
+        if model == "gauss":
+            self.offline = Offline(k, model="gauss")
+        self.k = k
+        self.p = p
+
+    def get_cp_k_votes(self, cps, k):
+        cps = numpy.array(cps)
+        new_cps = []
+        for k in range(cps.shape[1]):
+            new_cps.append(sorted(cps[:,k].reshape(-1).tolist()))
+        return [item[k] for item in new_cps]
+
+
+
+    def find_change_points_opt(self, data):
+        self.cps = []
+        for k in range(data.shape[0]):
+            self.cps.append(self.offline.find_change_points_opt(data[k].reshape(1, -1)))
+        return self.cps
+
+    def find_change_points_bin(self, data):
+        self.cps = []
+        for k in range(data.shape[0]):
+            temp_cps = self.offline.find_change_points_bin(data[k].reshape(1, -1))
+            self.cps.append(temp_cps)
+            print(f"CHANNEL {k}:", temp_cps)
+        return self.cps
+    
         
         
 
@@ -279,22 +318,21 @@ class Offline:
 
             return mu, sigma
 
-    def _log_liklihood(self, mu, sigma, data):
+    def _log_liklihood(self, data):
         """
         Calculates the pseudo log liklihood. We don't include the normalizing
         term at the beginning of the Gaussian PDF. This acts as a metric of
         how well the data fits to the model.
         """
-        val = 0
-        sigma_inv = np.linalg.pinv(sigma)
-        n = data.shape[0]
+        assert data.shape[0] == 1
+        data = data[0]
+        mu = data.sum() / data.shape[0]
+        mu_squared = (data * data).sum() / data.shape[0]
+        sigma_2 = mu_squared - mu**2
         liklihood = 0
-        mu = mu.reshape(-1)
-        for i in range(data.shape[1]):
-            y = data[:, i]
-            lik =  (-1/2) * ( (y - mu).T @ sigma_inv @ (y-mu) ) 
-            liklihood+=lik
-            
+        for x in data:
+            pr = np.sqrt(1/(2*3.1415*sigma_2)) * np.exp((1/(2*sigma_2)) * (x - mu)**2)
+            liklihood += np.log(pr)
         return liklihood
 
 
@@ -321,8 +359,7 @@ class Offline:
             if sub_section.shape[1] <= 1:
                 return np.inf
 
-            mu, sigma = self._fit_model(sub_section)
-            return - self._log_liklihood(mu, sigma, sub_section)
+            return - self._log_liklihood(sub_section)
 
     def _init_C(self, data):
         """
@@ -447,16 +484,35 @@ class Offline:
         return sorted(L)
 
 
-class basicHMM():
-    def __init__(self, k, covariance='full'):
+class HMMWrapped():
+    def __init__(self, k):
         self.k = k
-        self.covariance = covariance
+    def get_change_points(self, data):
+        cps = []
+        for k in range(data.shape[0]):
+            data_ = data[k].reshape(-1, 1)
+            model = basicHMM(self.k)
+            cps.append(model.fit(data_))
+            print(cps)
+        return cps
+
+    def get_cp_k_votes(self, cps, k):
+        cps = numpy.array(cps)
+        new_cps = []
+        for k in range(cps.shape[1]):
+            new_cps.append(sorted(cps[:,k].reshape(-1).tolist()))
+        return [item[k] for item in new_cps]
+
+
+
+class basicHMM():
+    def __init__(self, k):
+        self.k = k
 
 
     def _init_model(self):
         k = self.k
-        covariance = self.covariance
-        self.model = hmm.GaussianHMM(n_components=k, covariance_type=covariance, init_params='e', n_iter=20, verbose=True)
+        self.model = hmm.GaussianHMM(n_components=k, init_params='e', n_iter=100, verbose=True)
         start_prob =  np.zeros(k)
         start_prob[1] = 1
         trans_mat = np.zeros((k,k))
@@ -469,6 +525,7 @@ class basicHMM():
 
     def get_change_point(self, states):
         diff_pts = [states[i] - states[i-1] for i in range(1, len(states))]
+        print(sum(diff_pts))
         cps = []
         for i in range(len(diff_pts)):
             if diff_pts[i] != 0:
@@ -476,21 +533,10 @@ class basicHMM():
         return cps
 
     def fit(self, data):
-        models = []
-        scores = []
-        for _ in range(20):
-            try:
-                self._init_model()
-                self.model.fit(data)
-                states = self.model.predict(data)
-                models.append(self.model)
-                scores.append(self.model.score(data))
-            except Exception as e:
-                print(e)
-                print("FAILED TO CONVERGE")
-
-        model = models[np.argmax(scores)]
-        return self.get_change_point(model.predict(data))
+        self._init_model()
+        self.model.fit(data)
+        l, states = self.model.decode(data)
+        return self.get_change_point(self.model.predict(data))
 
 
 
